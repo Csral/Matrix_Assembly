@@ -76,19 +76,27 @@ _err_not_supported:
     ret
 
 # ------------------------ Multiplication
-
-# Returns a reference value in eax register
-# Expects a pointer (reference) to the matrix 1 and matrix 2 (reverse order)
-# Expect all registers to be over-written. Saving is the caller's job
-# Restoring stack (removal of arguments) is also the caller's job
-
-# *** Function signature.
+# *** Function signature:
+#                           multiplication(Matrix* A, Matrix* B)
+#
+#   Following GNU-C (cdecl) calling convention on x86 (32-bit)
+#   -> Expected parameters are pushed on the stack in reverse order
+#   -> Caller-saved registers (eax, ecx, edx) will be overwritten by the callee.
+#   -> Callee must preserve callee-saved registers (ebx, esi, edi, ebp).
+#   -> Restoring stack (popping arguments) is caller's job
+#   -> Return value will be given in eax register
+#   -> Return value is the base memory address for an array
+#
 # Expected parameter(s): A reference to the both the matrices, i.e., base memory address of matrix A and B.
+# Push matrix B followed by matrix A
+# This function returns a new matrix which is the product of A and B.
+# 
 #   
 #   Stack:
-#       Matrix B -> ebp + 12
-#       Matrix A -> ebp + 8
+#       Matrix B -> ebp + 24
+#       Matrix A -> ebp + 20
 #       Return Address
+#       Callee saved registers
 #
 # *** Register architecture:
 # For all cross verification etc, we use ebx, ecx and edi registers.
@@ -114,96 +122,158 @@ _err_not_supported:
 #       
 #       Matrix ans would be of size: (r*s)
 #
+# for i in range(num_rows_of_1st_matrix)
+#     for k in range(num_columns_of_1st_matrix)
+#         for j in range(num_columns_of_2nd_matrix)
+#               print(f"<{i+1},{j+1}> = ({i+1},{k+1}) * [{k+1},{j+1}]")
+
+# Allocate required space and fill the matrix.
+# Check:
+# >>> for r in range(3):
+# ...     for c in range(3):
+# ...         print(f"({r+1},{c+1}) -> {4*c + (4 * 3 * r)}")
+# ...
+# (1,1) -> 0
+# (1,2) -> 4
+# (1,3) -> 8
+# (2,1) -> 12
+# (2,2) -> 16
+# (2,3) -> 20
+# (3,1) -> 24
+# (3,2) -> 28
+# (3,3) -> 32
 # ******* element (i,j) of a matrix where each element consumes 'size' bytes with 'nc' columns is: 
 #  
 #                                           size * (j + (nc * i))
+#
+# -----------------------------------
+# There are labels ending with __RETURN__ in this function used to return control
+# from a lower-level loop back to a higher-level loop.
+#
+# When a lower-level loop finishes, it needs to jump back to a higher-level loop
+# to either terminate or continue further cycles.
+#
+# Thus, the inner loop needs to transfer its instruction pointer to the address of first byte under these "__RETURN__" labels
+# (Simply to say, perform an unconditional jump).
+#
+# A separate label is required because the main label should not update the looping variable
+# until the inner loop is completed.
+# -----------------------------------
 
 .type multiplication, @function
 multiplication:
 
     # Store stack
 
+    push %ebx
+    push %esi
+    push %edi
     push %ebp
     mov %esp, %ebp
 
-    # for i in range(num_rows_of_1st_matrix)
-    #     for k in range(num_columns_of_1st_matrix)
-    #         for j in range(num_columns_of_2nd_matrix)
-    #               print(f"<{i+1},{j+1}> = ({i+1},{k+1}) * [{k+1},{j+1}]")
-
-    # Allocate required space and fill the matrix.
-    # Check:
-    # >>> for r in range(3):
-    # ...     for c in range(3):
-    # ...         print(f"({r+1},{c+1}) -> {4*c + (4 * 3 * r)}")
-    # ...
-    # (1,1) -> 0
-    # (1,2) -> 4
-    # (1,3) -> 8
-    # (2,1) -> 12
-    # (2,2) -> 16
-    # (2,3) -> 20
-    # (3,1) -> 24
-    # (3,2) -> 28
-    # (3,3) -> 32
-
     # Space to store size of matrices and loop index variables
-    sub $24, %esp
+    sub $28, %esp
 
-    mov 8(%ebp), %ebx #1st matrix
-    mov (%ebx), %ecx # num rows of 1st matrix
-    mov %ecx, -4(%ebp) # r
+    mov 20(%ebp), %ebx                      #1st matrix
+    mov (%ebx), %ecx                        # num rows of 1st matrix
+    mov %ecx, -4(%ebp)                      # r
 
-    mov $1, %edi
-    mov (%ebx, %edi, 4), %ecx # num columns of 1st matrix
-    mov %ecx, -8(%ebp) # c
+    mov $1, %edi                            # 1st index of matrix A
+    mov (%ebx, %edi, 4), %ecx               # num columns of 1st matrix
+    mov %ecx, -8(%ebp)                      # c
 
-    mov 12(%ebp), %ebx #2nd matrix
-    mov (%ebx, %edi, 4), %ecx # num columns of 2nd matrix
-    mov %ecx, -12(%ebp) # s
+    mov 24(%ebp), %ebx                      #2nd matrix
+    mov (%ebx, %edi, 4), %ecx               # num columns of 2nd matrix
+    mov %ecx, -12(%ebp)                     # s
 
-    mov (%ebx), %ecx # num rows of 2nd matrix
-    mov -8(%ebp), %ebx # num of columns of 1st matrix
+    mov (%ebx), %ecx                        # num rows of 2nd matrix
+    mov -8(%ebp), %ebx                      # num of columns of 1st matrix
 
-    cmp %ebx, %ecx
-    jne _cannot_multiply_matrix
+    cmp %ebx, %ecx                          # if columns of matrix A != rows of matrix B
+    jne _cannot_multiply_matrix             # then exit
 
     #* We are not saving the rows of 2nd matrix because this must be same as column size of 1st matrix.
     # Set all loop variables to 0.
 
-    xor %ecx, %ecx # quick zero ecx
-    mov %ecx, -16(%ebp) # i
-    mov %ecx, -20(%ebp) # k
-    mov %ecx, -24(%ebp) # j
+    xor %ecx, %ecx                          # quick zero ecx
+    mov %ecx, -16(%ebp)                     # i
+    mov %ecx, -20(%ebp)                     # k
+    mov %ecx, -24(%ebp)                     # j
+
+    jmp _MATRIX_LIB_loop_internal_1st_matrix_rows       # unconditionally jump and start the loop
 
 _MATRIX_LIB_loop_internal_1st_matrix_rows:
 
     #* The outermost loop. Loops for every row within 1st matrix!
     # Loop variable: i
+    # Load variable: i, r
+    # if i == r then matrix multiplication must have ended. Return the answer
+    # else go into the middle loop
+    #
+    # Register architecture:
+    #   i -> edi
+    #   r -> edx
 
-    mov -16(%ebp), %edi # load loop variable
-    mov -4(%ebp), %ebx # r
+    mov -16(%ebp), %edi     # load loop variable -> i
+    mov -4(%ebp), %edx      # r
 
-    cmp %edi, %ebx
-    je _MATRIX_LIB_internal_end_loop # matrix multiplication must have ended.
+    cmp %edx, %edi                                  # if i == r
+    je _MATRIX_LIB_internal_end_loop_and_return     # matrix multiplication must have ended.
 
     # Go to middle loop.
     jmp _MATRIX_LIB_loop_internal_1st_matrix_columns
+
+    _MATRIX_LIB_loop_internal_1st_matrix_rows_RETURN__:
+
+        # The middle loop has ended.
+        # Update looping conditions (outer loop) and jump back (unconditionally)
+        # The label checks if the looping has ended as a whole
+
+        mov -16(%ebp), %edi                                 # load loop variable
+        inc %edi                                            # update looping variable
+        mov %edi, -16(%ebp)                                 # Store back the looping variable
+
+        jmp _MATRIX_LIB_loop_internal_1st_matrix_rows       # unconditionally jump back to outer loop.
 
 _MATRIX_LIB_loop_internal_1st_matrix_columns:
     
     #* The middle loop. Loops for every column within 1st matrix!
     # Loop variable: k
+    # Load variable: k, c
+    # if k < c then go into inner loop
+    # else go to outer loop
+    # Register architecture:
+    #   k -> edi
+    #   c -> edx
 
-    mov -20(%ebp), %edi # load loop variable
-    mov -8(%ebp), %ebx # c
+    mov -20(%ebp), %edi                                 # load loop variable -> k
+    mov -8(%ebp), %edx                                  # c
 
-    # Increase row if columns is maxed out and set column looper to 0.
-    cmp %edi, %ebx
-    je _MATRIX_LIB_loop_internal_1st_matrix_columns__INTERNAL_incr_row
+    cmp %edx, %edi                                      # if k < c
+    jl _MATRIX_LIB_loop_internal_2nd_matrix_columns     # then go into the inner loop
 
-    # Go to inner loop
+    # if not, then middle loop has fulfilled its purpose!
+    # reset the loop variable
+    # unconditionally jump to outer loop.
 
+    mov -20(%ebp), %edi                                 # load k
+    xor %edi, %edi                                      # k = 0
+    mov %edi, -20(%ebp)                                 # store back the variable
+
+    jmp _MATRIX_LIB_loop_internal_1st_matrix_rows       # unconditionally jump to outer loop
+
+    _MATRIX_LIB_loop_internal_1st_matrix_columns_RETURN__:
+
+        # The inner loop has ended.
+        # Update looping conditions (middle loop) and jump back (unconditionally)
+        # As the label checks if the loop is completed or not.
+
+        mov -20(%ebp), %edi                                     # load the looping variable
+        inc %edi                                                # increase the looping variable
+        mov %edi, -20(%ebp)                                     # store back the looping variable
+
+        jmp _MATRIX_LIB_loop_internal_1st_matrix_columns        # unconditionally jump back to middle loop.
+    
 _MATRIX_LIB_loop_internal_2nd_matrix_columns:
 
     #* The inner loop. Loops for every column within 2st matrix!
@@ -220,22 +290,20 @@ _MATRIX_LIB_loop_internal_2nd_matrix_columns:
     #
     # Save and restore registers that are needed to be used.
 
-    mov -24(%ebp), %edx     # load loop variable -> j
-    mov -12(%ebp), %edi     # s
-    mov -16(%ebp), %ecx     # i
-    mov -20(%ebp), %esi     # k
+    mov -24(%ebp), %edx                 # load loop variable -> j
+    mov -12(%ebp), %edi                 # s
+    mov -16(%ebp), %ecx                 # i
+    mov -20(%ebp), %esi                 # k
     
     # load matrix A and B
-    mov 8(%ebp), %eax
-    mov 12(%ebp), %ebx
-
-    # while j < s
+    mov 20(%ebp), %eax                  # Matrix A
+    mov 24(%ebp), %ebx                  # Matrix B
 
     cmp %edx, %edi
-    je _MATRIX_LIB_loop_internal_2nd_matrix_columns__end
+    je _MATRIX_LIB_loop_internal_2nd_matrix_columns__end        # if j == s then end inner loop
 
     # Assume s to be unloaded here, used for any purpose and matrix ans can be loaded when needed.
-
+    #
     # 4 * ( j + ( s * i) ) -> the element being computed!
     # 4 * ( k + ( c * i) ) -> 1st matrix : fetch and store value in eax
     # 4 * ( j + ( s * k) ) -> 2nd matrix : fetch and store value in ebx
@@ -247,22 +315,22 @@ _MATRIX_LIB_loop_internal_2nd_matrix_columns:
         # overwrite j with c and load i into edi
     mov -8(%ebp), %edx
     mov %ecx, %edi
-    imul %edx, %edi     # edi = edi * edx
-    add %esi, %edi      # esi = esi + edi
-    imul $4, %edi       # edi = size * edi (4 for now, change later!)
+    imul %edx, %edi                     # edi = edi * edx
+    add %esi, %edi                      # esi = esi + edi
+    imul $4, %edi                       # edi = size * edi (4 for now, change later!)
 
     # restore edx register
-    mov -24(%ebp), %edx     # j
+    mov -24(%ebp), %edx                 # j
 
     # edi now has element offset of matrix A
     # load element into eax
     mov (%eax, %edi), %eax
 
     # 2nd matrix elemental offset
-    mov -12(%ebp), %edi # s
-    imul %esi, %edi     # edi = edi * esi = s * k
-    add %edx, %edi      # edi = edi + edx
-    imul $4, %edi       # edi = size * edi (4 for now, change later!)
+    mov -12(%ebp), %edi                 # s
+    imul %esi, %edi                     # edi = edi * esi = s * k
+    add %edx, %edi                      # edi = edi + edx
+    imul $4, %edi                       # edi = size * edi (4 for now, change later!)
 
     # edi now has element offset of matrix B
     # load element into ebx
@@ -313,5 +381,21 @@ _MATRIX_LIB_loop_internal_2nd_matrix_columns:
         xor %edx, %edx              # reset loop variable
         mov %edx, -24(%ebp)         # Store back the loop variable
 
-        jmp _MATRIX_LIB_loop_internal_1st_matrix_columns        # unconditionally jump back to middle loop.
+        jmp _MATRIX_LIB_loop_internal_1st_matrix_columns_RETURN__       # unconditionally jump back to middle loop.
+
+_MATRIX_LIB_internal_end_loop_and_return:
+
+    # The matrix multiplication has finished.
+    # Load the base memory address of matrix ans into eax
+    # restore the stack pointer
+    # return
+
+    mov -28(%ebp), %eax     # load return value into eax
+    
+    mov %ebp, %esp          # restore the stack pointer
+    pop %ebp                # remove base pointer from stack            (Callee saved register)
+    pop %edi                # remove index pointer from stack           (Callee saved register)
+    pop %esi                # remove string index pointer from stack    (Callee saved register)
+    pop %ebx                # remove ebx from stack                     (Callee saved register)
+    ret                     # transfer control to callee
 
