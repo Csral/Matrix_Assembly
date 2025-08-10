@@ -77,7 +77,7 @@ _err_not_supported:
 
 # ------------------------ Multiplication
 # *** Function signature:
-#                           multiplication(Matrix* A, Matrix* B)
+#                           multiplication(Matrix* A, Matrix* B, Matrix* ans)
 #
 #   Following GNU-C (cdecl) calling convention on x86 (32-bit)
 #   -> Expected parameters are pushed on the stack in reverse order
@@ -90,9 +90,10 @@ _err_not_supported:
 # Expected parameter(s): A reference to the both the matrices, i.e., base memory address of matrix A and B.
 # Push matrix B followed by matrix A
 # This function returns a new matrix which is the product of A and B.
-# 
+# Register ecx will have error code.
 #   
 #   Stack:
+#       Matrix ans -> ebp + 28
 #       Matrix B -> ebp + 24
 #       Matrix A -> ebp + 20
 #       Return Address
@@ -146,6 +147,9 @@ _err_not_supported:
 #  
 #                                           size * (j + (nc * i))
 #
+# When we calculate the elemental offset, we must add 8 bytes as the first 2 long integers (8 bytes) of every matrix
+# should contain their row, column information. This doesn't depend on datatype and is always 8.
+#
 # -----------------------------------
 # There are labels ending with __RETURN__ in this function used to return control
 # from a lower-level loop back to a higher-level loop.
@@ -191,6 +195,9 @@ multiplication:
 
     cmp %ebx, %ecx                          # if columns of matrix A != rows of matrix B
     jne _cannot_multiply_matrix             # then exit
+
+    mov 28(%ebp), %ecx                      # Move matrix ans into ecx
+    mov %ecx, -28(%ebp)                     # Store matrix ans into its expected location
 
     #* We are not saving the rows of 2nd matrix because this must be same as column size of 1st matrix.
     # Set all loop variables to 0.
@@ -246,21 +253,21 @@ _MATRIX_LIB_loop_internal_1st_matrix_columns:
     #   k -> edi
     #   c -> edx
 
-    mov -20(%ebp), %edi                                 # load loop variable -> k
-    mov -8(%ebp), %edx                                  # c
+    mov -20(%ebp), %edi                                         # load loop variable -> k
+    mov -8(%ebp), %edx                                          # c
 
-    cmp %edx, %edi                                      # if k < c
-    jl _MATRIX_LIB_loop_internal_2nd_matrix_columns     # then go into the inner loop
+    cmp %edx, %edi                                              # if k < c
+    jl _MATRIX_LIB_loop_internal_2nd_matrix_columns             # then go into the inner loop
 
     # if not, then middle loop has fulfilled its purpose!
     # reset the loop variable
     # unconditionally jump to outer loop.
 
-    mov -20(%ebp), %edi                                 # load k
-    xor %edi, %edi                                      # k = 0
-    mov %edi, -20(%ebp)                                 # store back the variable
+    mov -20(%ebp), %edi                                         # load k
+    xor %edi, %edi                                              # k = 0
+    mov %edi, -20(%ebp)                                         # store back the variable
 
-    jmp _MATRIX_LIB_loop_internal_1st_matrix_rows       # unconditionally jump to outer loop
+    jmp _MATRIX_LIB_loop_internal_1st_matrix_rows_RETURN__      # unconditionally jump to outer loop
 
     _MATRIX_LIB_loop_internal_1st_matrix_columns_RETURN__:
 
@@ -299,7 +306,7 @@ _MATRIX_LIB_loop_internal_2nd_matrix_columns:
     mov 20(%ebp), %eax                  # Matrix A
     mov 24(%ebp), %ebx                  # Matrix B
 
-    cmp %edx, %edi
+    cmp %edi, %edx
     je _MATRIX_LIB_loop_internal_2nd_matrix_columns__end        # if j == s then end inner loop
 
     # Assume s to be unloaded here, used for any purpose and matrix ans can be loaded when needed.
@@ -318,6 +325,7 @@ _MATRIX_LIB_loop_internal_2nd_matrix_columns:
     imul %edx, %edi                     # edi = edi * edx
     add %esi, %edi                      # esi = esi + edi
     imul $4, %edi                       # edi = size * edi (4 for now, change later!)
+    add $8, %edi                        # add 8 bytes for row and column
 
     # restore edx register
     mov -24(%ebp), %edx                 # j
@@ -331,6 +339,7 @@ _MATRIX_LIB_loop_internal_2nd_matrix_columns:
     imul %esi, %edi                     # edi = edi * esi = s * k
     add %edx, %edi                      # edi = edi + edx
     imul $4, %edi                       # edi = size * edi (4 for now, change later!)
+    add $8, %edi                        # add 8 bytes for row and column
 
     # edi now has element offset of matrix B
     # load element into ebx
@@ -349,10 +358,11 @@ _MATRIX_LIB_loop_internal_2nd_matrix_columns:
 
     # Elemental offset for matrix ans
 
-    mov -12(%ebp), %edi # s
-    imul %ecx, %edi     # edi = edi * ecx = s * i
-    add %edx, %edi      # edi = edi + edx
-    imul $4, %edi       # edi = size * edi (4 for now, change later!)
+    mov -12(%ebp), %edi                     # s
+    imul %ecx, %edi                         # edi = edi * ecx = s * i
+    add %edx, %edi                          # edi = edi + edx
+    imul $4, %edi                           # edi = size * edi (4 for now, change later!)
+    add $8, %edi                            # add 8 bytes.
 
     # edi now has element offset for matrix ans
     # load matrix ans
@@ -390,6 +400,8 @@ _MATRIX_LIB_internal_end_loop_and_return:
     # restore the stack pointer
     # return
 
+    xor %ecx, %ecx          # No errors.
+
     mov -28(%ebp), %eax     # load return value into eax
     
     mov %ebp, %esp          # restore the stack pointer
@@ -399,3 +411,14 @@ _MATRIX_LIB_internal_end_loop_and_return:
     pop %ebx                # remove ebx from stack                     (Callee saved register)
     ret                     # transfer control to callee
 
+_cannot_multiply_matrix:
+
+    mov $1, %ecx            # Error code: 1 -> Different sizes
+    mov -28(%ebp), %eax     # load return value into eax
+
+    mov %ebp, %esp          # restore the stack pointer
+    pop %ebp                # remove base pointer from stack            (Callee saved register)
+    pop %edi                # remove index pointer from stack           (Callee saved register)
+    pop %esi                # remove string index pointer from stack    (Callee saved register)
+    pop %ebx                # remove ebx from stack                     (Callee saved register)
+    ret                     # transfer control to callee
